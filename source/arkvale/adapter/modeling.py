@@ -81,10 +81,10 @@ def _arkvale_attn_forward(
     value_states = value_states.view(
         bsz, q_len, self.num_key_value_heads, self.head_dim
     )
-
+    # 1st, 2nd layer에서는 no budget -> full attention 수행하며, 3rd layer부터 budget 적용
     kvc = state.kv_caches[cur_id]
     budget = state.layer2budget[cur_id]
-
+    # pf means prefetch (n layers)
     n_pf_layers = state.n_prefetch_layers
     may_do_pf = q_len == 1 and n_pf_layers is not None
     do_send_pf = do_recv_pf = False
@@ -128,25 +128,31 @@ def _arkvale_attn_forward(
             rope_scale=self.rotary_emb.scaling_factor,
             rope_theta=self.rotary_emb.base,
         )
-
+    # prefill 일 경우 KV 캐시 블락 할당?
     if q_len > 1:
         state.attn_layers[cur_id] = self
+        print("[Prefill] KV Page allocation on GPU at layer", cur_id)
         kvc.prefill_alloc_n_tokens(q_len, state.alloc_page)
-
+    # 현재 layer KV cache (GPU)를 kv block Pool (GPU) 에 저장 (self.kv_caches[layer_idx])
+    print("[Prefill] KV Page Write at layer", cur_id)
     state.append_paged_kv_cache(cur_id, key_states, value_states)
 
     if q_len > 1:
         if budget is not None:
             with torch.cuda.stream(state.prefill_backup_stream):
+                print("[Prefill] backup KV to Host at layer", cur_id)
                 state.prefill_backup_pages(cur_id)
                 evt = torch.cuda.Event()
                 evt.record(state.prefill_backup_stream)
                 state.prefill_backup_events[cur_id] = evt
-            state.prefill_save_digests(cur_id, key_states)
-        attn_output = state.prefill_sdpa(cur_id, query_states)
+            print("[Prefill] save digests at layer", cur_id)
+            state.prefill_save_digests(cur_id, key_states) # 현재 레이어의 key 이용해 digest 생성
+        print("[Prefill] full attention at layer", cur_id)
+        attn_output = state.prefill_sdpa(cur_id, query_states) # attention 계산
+        print("[Prefill] estimate pages for eviction at layer", cur_id) # budget 초과 블락 eviction
         infer_state.prefill_evict_extra_pages(
             cur_id, query_states[:, -1:, ...].contiguous()
-        )
+        ) # budget 초과 블락 eviction (budget == none 이면 무시)
     else:
         attn_page_ids = kvc.c2p
         if budget is not None and kvc.n_pages > budget:
@@ -157,13 +163,22 @@ def _arkvale_attn_forward(
                     )
                     state.on_decode_prefetch[pf_src_id % (n_pf_layers + 1)] = False
             else:
+                print("[Decode] estimation at layer", cur_id)
                 _, eids, _ = state.estimate_select_recall(cur_id, query_states)
             # if state.use_sparse_attn:
             #     attn_page_ids = eids
             assert not state.use_sparse_attn
 
+        print("[Decode] attention with selected KVs at layer", cur_id)
         attn_output = state.decode_sdpa(cur_id, query_states, attn_page_ids)
-
+    print(attn_output)
+    if cur_id == 0:
+        attn_results = []
+    attn_results.append(attn_output)
+    if cur_id == n_layers - 1:
+        file_name = f"attn_output_{infer_state.seq_len}th_token.pt" 
+        torch.save(attn_results, file_name)
+        print(f"[Decode] saved attn outputs at {file_name}")
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
     if self.config.pretraining_tp > 1:

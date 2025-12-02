@@ -1,4 +1,6 @@
-torch
+wheel
+torch==2.7.1
+# pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 numpy
 scikit-learn
 scipy
@@ -13,7 +15,7 @@ fastchat
 flash_attn
 einops 
 sentencepiece
-datasets
+datasets==3.6.0
 accelerate
 protobuf
 transformers==4.40.0

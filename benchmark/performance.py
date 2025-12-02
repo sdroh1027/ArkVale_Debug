@@ -12,6 +12,7 @@ import random
 import argparse
 import time
 
+torch.cuda.set_device(7)
 
 def parse_args(cmd_args=None):
     ap = argparse.ArgumentParser()
@@ -41,7 +42,7 @@ def parse_args(cmd_args=None):
     ap.add_argument("--n-win-pages", type=int, default=2)
     ap.add_argument("--n-sink-pages", type=int, default=1)
     ap.add_argument("--use-3-stages-gen", action="store_true")
-    ap.add_argument("--repeat", type=int, default=-1)
+    ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--lengths", type=int, nargs="*")
     args = ap.parse_args(cmd_args)
     args.e = False
@@ -124,6 +125,7 @@ def get_pred(
 
     start = 0
     if os.path.exists(out_path):
+        open(out_path, "w").close() # sidong. erase all
         with open(out_path, "r") as f:
             start = len(list(f))
     if start >= len(data):
@@ -226,6 +228,8 @@ def get_pred(
             for _ in range(1, repeat):
                 _gen()
         with open(out_path, "a", encoding="utf-8") as f:
+            if not times:
+                times = [0.0]
             json.dump(
                 {
                     "batch_size": args.batch_size,

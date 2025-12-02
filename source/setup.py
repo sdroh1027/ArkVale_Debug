@@ -3,7 +3,7 @@ from setuptools.command.build_ext import build_ext
 from setuptools.extension import Extension
 import os
 import subprocess
-import torch
+#import torch
 
 
 class CMakeExtension(Extension):
@@ -18,6 +18,7 @@ class CMakeBuild(build_ext):
             self.build_extension(ext)
 
     def build_extension(self, ext):
+        import torch
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
         cmake_args = [
             f"-DCMAKE_PREFIX_PATH={torch.utils.cmake_prefix_path}",

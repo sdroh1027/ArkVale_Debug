@@ -260,6 +260,7 @@ class InferState:
         if self.kv_last_page_len + 1 >= self.page_size:
             self.default_stream.wait_stream(self.decode_backup_stream)
         pre = [kvc.n_real_pages for kvc in self.kv_caches]
+        print("[Decode] allocate single page for GPU at all layers")
         n_new_kv_pages = utils.all_eq(
             kvc.decode_alloc_1_token(self.alloc_page) for kvc in self.kv_caches
         )
@@ -269,6 +270,7 @@ class InferState:
         self.kv_last_page_lens = torch.tensor(
             [self.kv_last_page_len] * bsz, **self._i32
         )
+        print("[Decode] allocate single page for CPU at all layers")
         [kvc.decode_alloc_1_token() for kvc in self.cpu_kv_caches if kvc]
 
         if n_new_kv_pages > 0:
@@ -294,6 +296,7 @@ class InferState:
             dg_caches = [dgc for dgc in self.dg_caches if dgc]
             # if len(dg_caches) > 0 and self.kv_last_page_len == self.page_size:
             if len(dg_caches) > 0:
+                print("[Decode] allocate single page for digest(GPU) at all layers")
                 n_new_dg_pages = utils.all_eq(
                     dgc.decode_alloc_1_token(self.alloc_page) for dgc in dg_caches
                 )
@@ -309,7 +312,7 @@ class InferState:
                     self.dg_indptrs = torch.arange(
                         0, bsz * n_dg_pages + 1, n_dg_pages, **self._i32
                     )
-
+                print("[Decode] save last page at all layers")
                 with torch.cuda.stream(self.decode_backup_stream):
                     [self.decode_backup_1_page(l) for l in range(self.n_layers)]
                 [self.decode_save_1_digest(l) for l in range(self.n_layers)]
@@ -411,7 +414,7 @@ class InferState:
         ng = self.n_groups
         eids = eids.reshape(bsz, ng, -1)
         rids = rids.reshape(bsz, ng, -1)
-
+        print("[Decode] recalling pages at layer", layer_idx)
         for i in range(kvc.batch_size):
             for j in range(self.n_groups):
                 nr = rids[i, j, 0]
@@ -488,8 +491,8 @@ class InferState:
         if kvc.budget is None:
             return
         if kvc.n_real_pages > kvc.budget:
-            ns = max(2, kvc.n_sink_pages)
-            nw = kvc.n_win_pages
+            ns = max(2, kvc.n_sink_pages) # 앞 토큰들
+            nw = kvc.n_win_pages # 뒤 토큰들
             assert ns + nw <= kvc.budget
             topk = kvc.budget - ns - nw
             kvc.c2p = torch.empty([bsz, kvc.budget], **kvc._i32)
@@ -503,6 +506,25 @@ class InferState:
             kernels.prefill_select_topk(
                 scores, dout, kvc.c2p, kvc.cc2gp, ev_gpi, kvc.gc2cc, buff, topk, ns, nw
             )
+            if False:
+                # compare kernel performance with torch.topk
+                time1 = time.time()
+                kernels.prefill_select_topk(
+                    scores, dout, kvc.c2p, kvc.cc2gp, ev_gpi, kvc.gc2cc, buff, topk, ns, nw
+                )
+                time2 = time.time()
+                topk_reproduct = scores[:,ns:-nw+1].topk(k=topk).indices + ns  
+                time3 = time.time()
+                print(f"prefill_select_topk kernel time: {time2 - time1}s") # 30 ~ 40us -> 1ms per decode
+                print(f"torch topk time: {time3 - time2}s") # 100 ~ 110us
+                print(f"diff: {(time2 - time1) / (time3 - time2)}")  ## torch 가 3배 느림
+                # compare topk
+                a = sorted(kvc.gc2cc.tolist()[0]) # 커널계산
+                b = sorted(topk_reproduct.tolist()[0]) # 직접 복원한계산
+                c = scores.topk(k=128).indices.sort().values.tolist()[0]
+                print(a, '\n', b)
+                print(set(a) - set(b))
+                print(set(b) - set(a))
             self.prefill_evicted_pages[layer_idx] = ev_gpi
         kvc.cc2gp = (
             kvc.cc2gp.reshape(bsz, 1, -1)
@@ -518,7 +540,7 @@ class InferState:
     def alloc_page(self):
         if len(self._pool._free_ids) <= 0:
             for i in range(self.n_layers):
-                kvc = self.kv_caches[i]
+                kvc = self.kv_caches[i]  # self.kv_caches: List[KvCache] = [None] * self.n_layers
                 evt = self.prefill_backup_events[i]
                 ev_gpi = self.prefill_evicted_pages[i]
                 if ev_gpi is None:
